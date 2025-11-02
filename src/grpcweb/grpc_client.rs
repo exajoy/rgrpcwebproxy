@@ -9,7 +9,10 @@ use hyper::client::conn::http2;
 use hyper::client::conn::http2::SendRequest;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+
+#[cfg(test)]
 use mockall::automock;
+
 use tokio::net::TcpStream;
 
 pub type MaybeSendRequest =
@@ -20,32 +23,43 @@ pub type MaybeResponse = Result<Response<Full<Bytes>>, Box<dyn std::error::Error
 #[derive(Clone)]
 pub struct GrpcClient;
 
-#[automock]
+#[cfg_attr(test, automock)]
 pub trait GrpcClientHandler {
-    fn get_full_forward_address(&self, original_uri: &hyper::Uri, forward_address: &str) -> String;
+    fn form_forward_url(
+        &self,
+        proxy_url: &str,
+        forward_req_base_url: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
     fn send_request(
         &self,
         request_sender: SendRequest<Full<Bytes>>,
         request: Request<Full<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = MaybeResponse> + Send>>;
-    fn forward_req(
+    fn process_req(
         &self,
-        full_forward_address: String,
-        original_req_headers: hyper::HeaderMap,
-        original_req_body: Full<Bytes>,
+        forward_url: &str,
+        proxy_req_headers: hyper::HeaderMap,
+        proxy_req_body: Full<Bytes>,
     ) -> Pin<Box<dyn Future<Output = MaybeResponse> + Send>>;
-    fn test_connection(
+    // make connection to grpc server
+    // and prepare request sender
+    fn connect(
         &self,
         authority: Authority,
     ) -> Pin<Box<dyn Future<Output = MaybeSendRequest> + Send>>;
 }
 impl GrpcClientHandler for GrpcClient {
-    fn get_full_forward_address(&self, original_uri: &hyper::Uri, forward_address: &str) -> String {
-        let path = original_uri.path();
-        let full_forward_address = format!("{}{}", forward_address, path);
-        full_forward_address
+    fn form_forward_url(
+        &self,
+        proxy_url: &str,
+        forward_req_base_url: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let proxy_req_uri: hyper::Uri = proxy_url.parse()?;
+        let path = proxy_req_uri.path();
+        let forward_url = format!("{}{}", forward_req_base_url, path);
+        Ok(forward_url)
     }
-    fn test_connection(
+    fn connect(
         &self,
         authority: Authority,
     ) -> Pin<Box<dyn Future<Output = MaybeSendRequest> + Send>> {
@@ -92,7 +106,7 @@ impl GrpcClientHandler for GrpcClient {
             let io = TokioIo::new(stream);
 
             let exec = TokioExecutor::new();
-            let (sender, conn) = http2::Builder::new(exec).handshake(io).await?;
+            let (req_sender, conn) = http2::Builder::new(exec).handshake(io).await?;
 
             // Spawn a task to poll the connection, driving the HTTP state
             tokio::task::spawn(async move {
@@ -100,7 +114,7 @@ impl GrpcClientHandler for GrpcClient {
                     println!("Connection failed: {:?}", err);
                 }
             });
-            Ok(sender)
+            Ok(req_sender)
         })
     }
     fn send_request(
@@ -117,13 +131,14 @@ impl GrpcClientHandler for GrpcClient {
         })
     }
 
-    fn forward_req(
+    fn process_req(
         &self,
-        full_forward_address: String,
-        original_req_headers: hyper::HeaderMap,
-        original_req_body: Full<Bytes>,
+        full_forward_address: &str,
+        proxy_req_headers: hyper::HeaderMap,
+        proxy_req_body: Full<Bytes>,
     ) -> Pin<Box<dyn Future<Output = MaybeResponse> + Send>> {
         let client = self.clone();
+        let full_forward_address = full_forward_address.to_string();
         Box::pin(async move {
             let uri = full_forward_address.to_string().parse::<hyper::Uri>()?;
             let authority = uri.authority().unwrap().clone();
@@ -131,10 +146,8 @@ impl GrpcClientHandler for GrpcClient {
             let mut forward_req = Request::builder()
                 .method(hyper::Method::POST)
                 .uri(uri)
-                .body(original_req_body)?;
-            forward_req
-                .headers_mut()
-                .extend(original_req_headers.clone());
+                .body(proxy_req_body)?;
+            forward_req.headers_mut().extend(proxy_req_headers.clone());
             forward_req
                 .headers_mut()
                 .insert(hyper::header::HOST, authority.as_str().parse().unwrap());
@@ -152,9 +165,9 @@ impl GrpcClientHandler for GrpcClient {
             forward_req
                 .headers_mut()
                 .remove(hyper::header::CONTENT_LENGTH);
-            let request_sender = client.test_connection(authority.clone()).await?;
-            let original_res = client.send_request(request_sender, forward_req).await?;
-            Ok(original_res)
+            let request_sender = client.connect(authority.clone()).await?;
+            let proxy_res = client.send_request(request_sender, forward_req).await?;
+            Ok(proxy_res)
         })
     }
 }
@@ -162,18 +175,19 @@ impl GrpcClientHandler for GrpcClient {
 mod tests {
 
     #[test]
-    fn test_get_full_forward_address() {
+    fn form_forward_url() {
         use super::{GrpcClient, GrpcClientHandler};
 
         let grpc_client = GrpcClient;
-        let original_uri: hyper::Uri = "http://localhost:3000/helloworld.Greeter/SayHello"
-            .parse()
+        let proxy_url = "http://localhost:3000/helloworld.Greeter/SayHello";
+        // .parse()
+        // .unwrap();
+        let forward_req_base_url = "http://localhost:8080";
+        let forward_url = grpc_client
+            .form_forward_url(proxy_url, forward_req_base_url)
             .unwrap();
-        let forward_address = "http://localhost:8080";
-        let full_forward_address =
-            grpc_client.get_full_forward_address(&original_uri, forward_address);
         assert_eq!(
-            full_forward_address,
+            forward_url,
             "http://localhost:8080/helloworld.Greeter/SayHello"
         );
     }
@@ -188,7 +202,7 @@ mod tests {
     //             Ok(response)
     //         })
     //     });
-    //     mock_grpc_client.expect_test_connection().returning(|_| {
+    //     mock_grpc_client.expect_connect().returning(|_| {
     //         Box::pin(async {
     //             let stream = TcpStream::connect("127.0.0.1:50051").await?;
     //             let io = TokioIo::new(stream);
@@ -198,13 +212,13 @@ mod tests {
     //         })
     //     });
     //
-    //     let original_res = mock_grpc_client
+    //     let proxy_res = mock_grpc_client
     //         .forward_req(
     //             "http://localhost:8080/helloworld.Greeter/SayHello".to_string(),
     //             hyper::HeaderMap::new(),
     //             Full::from(Bytes::from("Test body")),
     //         )
     //         .await;
-    //     // assert!(original_res.is_ok());
+    //     // assert!(proxy_res.is_ok());
     // }
 }

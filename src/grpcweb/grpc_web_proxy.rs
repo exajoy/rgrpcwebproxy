@@ -13,15 +13,13 @@ use crate::grpcweb::grpc_web_server::GrpcWebServerHandler;
 
 /// Main proxy action
 /// hold all parameters and handlers
-pub(crate) struct GrpcWebProxy<'a, T: GrpcClientHandler, S: GrpcWebServerHandler> {
+pub(crate) struct GrpcWebProxy<T: GrpcClientHandler, S: GrpcWebServerHandler> {
     pub proxy_address: String,
-    pub forward_address: String,
-    pub forward_host: &'a str,
-    pub forward_port: u16,
+    pub forward_base_url: String,
     grpc_client: T,
     grpc_web_server: S,
 }
-impl<T: GrpcClientHandler, S: GrpcWebServerHandler> GrpcWebProxy<'_, T, S> {
+impl<T: GrpcClientHandler, S: GrpcWebServerHandler> GrpcWebProxy<T, S> {
     pub async fn handle_grpc_web_request<F>(
         self: Arc<Self>,
         req: Request<F>,
@@ -31,12 +29,13 @@ impl<T: GrpcClientHandler, S: GrpcWebServerHandler> GrpcWebProxy<'_, T, S> {
         F::Data: Send,
         F::Error: std::error::Error + Send + Sync + 'static,
     {
-        // we need to build full forward address
-        // by combining forward host, forward port with
-        // uri path of original address
-        let full_forward_address = self
+        let proxy_url = req.uri().to_string();
+        // we need to build full forward req url
+        // by combining forward base url with
+        // uri path of proxy address
+        let forward_url = self
             .grpc_client
-            .get_full_forward_address(req.uri(), &self.forward_address);
+            .form_forward_url(&proxy_url, &self.forward_base_url)?;
         let headers = req.headers().clone();
 
         // convert incoming request to bytes
@@ -45,52 +44,28 @@ impl<T: GrpcClientHandler, S: GrpcWebServerHandler> GrpcWebProxy<'_, T, S> {
 
         // send request and
         // get response from grpc service
-        let original_res = self
+        let proxy_res = self
             .grpc_client
-            .forward_req(full_forward_address, headers, body)
+            .process_req(&forward_url, headers, body)
             .await?;
 
         // forward response to grpc web client
-        let forward_response = self.grpc_web_server.return_response(original_res).await?;
+        let forward_response = self.grpc_web_server.return_res(proxy_res).await?;
 
         Ok(forward_response)
     }
 }
-impl<'a> GrpcWebProxy<'a, GrpcClient, GrpcWebServer> {
-    ///
+
+impl GrpcWebProxy<GrpcClient, GrpcWebServer> {
     /// create GrpcWebProxy instance from Args
-    /// # Examples
-    /// ```
-    /// let args = Args {
-    ///     proxy_host: "localhost".to_string(),
-    ///     proxy_port: 8080,
-    /// };
-    /// let grpc_web_proxy = GrpcWebProxy::new(&args);
-    /// assert_eq!(grpc_web_proxy.proxy_address, "http://localhost:8080");
-    /// ```
-    pub fn from_args(args: &'a Args) -> Self {
+    pub fn from_args(args: &Args) -> Self {
         let proxy_address = format!("{}:{}", args.proxy_host, args.proxy_port);
-        let forward_address = format!("http://{}:{}", args.forward_host, args.forward_port);
+        let forward_base_url = format!("http://{}:{}", args.forward_host, args.forward_port);
         let grpc_client = GrpcClient;
         let grpc_web_server = GrpcWebServer;
         GrpcWebProxy::<GrpcClient, GrpcWebServer> {
             proxy_address,
-            forward_address,
-            forward_host: &args.forward_host,
-            forward_port: args.forward_port,
-            grpc_client,
-            grpc_web_server,
-        }
-    }
-    #[cfg(test)]
-    fn default() -> Self {
-        let grpc_client = GrpcClient;
-        let grpc_web_server = GrpcWebServer;
-        GrpcWebProxy::<GrpcClient, GrpcWebServer> {
-            proxy_address: "".to_string(),
-            forward_address: "".to_string(),
-            forward_host: "",
-            forward_port: 0,
+            forward_base_url,
             grpc_client,
             grpc_web_server,
         }
@@ -106,73 +81,47 @@ mod tests {
 
     use super::*;
 
-    impl GrpcWebProxy<'_, MockGrpcClientHandler, MockGrpcWebServerHandler> {
+    impl GrpcWebProxy<MockGrpcClientHandler, MockGrpcWebServerHandler> {
         fn with_mock(
             grpc_client: MockGrpcClientHandler,
             grpc_web_server: MockGrpcWebServerHandler,
         ) -> Self {
             GrpcWebProxy {
                 proxy_address: "".to_string(),
-                forward_address: "".to_string(),
-                forward_host: "",
-                forward_port: 0,
+                forward_base_url: "".to_string(),
                 grpc_client,
                 grpc_web_server,
             }
         }
     }
-    #[test]
-    fn test_get_full_forward_address() {
-        // let mut mock_grpc_client_handler = MockGrpcClientHandler::new();
-        // mock_grpc_client_handler
-        //     .expect_get_full_forward_address()
-        //     .returning(move |original_uri, forward_url| {
-        //         let path = original_uri.path();
-        //         format!("http://forward_address{}", path)
-        //     });
-
-        // let client = Client;
-        // let grpc_web_proxy = super::GrpcWebProxy {
-        //     proxy_address: "".to_string(),
-        //     forward_address: "".to_string(),
-        //     forward_host: "",
-        //     forward_port: 0,
-        //     client,
-        // };
-        let grpc_web_proxy = GrpcWebProxy::default();
-        assert_eq!(
-            grpc_web_proxy.grpc_client.get_full_forward_address(
-                &"/test/path".parse().unwrap(),
-                "http://forward_address:3000",
-            ),
-            "http://forward_address:3000/test/path"
-        );
-    }
     #[tokio::test]
     async fn test_forward_request() {
         let mut mock_grpc_client_handler = MockGrpcClientHandler::new();
+        let successful_res = Response::builder()
+            .status(200)
+            .body(Full::from(Bytes::from("response body")))
+            .unwrap();
 
         mock_grpc_client_handler
-            .expect_get_full_forward_address()
-            .returning(|_, _| "".to_string());
+            .expect_form_forward_url()
+            .returning(|_, _| Ok("".to_string()));
+
+        let successful_res_clone = successful_res.clone();
         mock_grpc_client_handler
-            .expect_forward_req()
-            .returning(|_, _, _| {
-                Box::pin(async move {
-                    let response = Response::builder()
-                        .status(200)
-                        .body(Full::from(Bytes::from("response body")))?;
-                    Ok(response)
-                })
+            .expect_process_req()
+            .returning(move |_, _, _| {
+                let successful_res_clone = successful_res_clone.clone();
+                Box::pin(async move { Ok(successful_res_clone) })
             });
+
         let mut mock_grpc_web_server_handler = MockGrpcWebServerHandler::new();
+
+        let successful_res_clone = successful_res.clone();
         mock_grpc_web_server_handler
-            .expect_return_response()
-            .returning(|original_res| {
-                let response = Response::builder()
-                    .status(original_res.status())
-                    .body(Full::from(Bytes::from("modified response body")))?;
-                Ok(response)
+            .expect_return_res()
+            .returning(move |_| {
+                let successful_res_clone = successful_res_clone.clone();
+                Ok(successful_res_clone.clone())
             });
         let grpc_web_proxy = Arc::new(GrpcWebProxy::with_mock(
             mock_grpc_client_handler,
