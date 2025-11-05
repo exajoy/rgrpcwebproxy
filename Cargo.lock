@@ -208,26 +208,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grpcweb-proxy-in-rust"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bytes",
- "clap",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "mockall",
- "percent-encoding",
- "pin-project",
- "tokio",
- "tower",
- "tracing",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -557,6 +537,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "rgrpcwebproxy"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "clap",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mockall",
+ "percent-encoding",
+ "pin-project",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

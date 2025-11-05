@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use clap::Parser;
+use http::Uri;
 use http::uri::Authority;
-use http::{HeaderValue, Uri};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http2;
@@ -11,9 +11,11 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
 use tower::BoxError;
+use tower::ServiceBuilder;
 
 use crate::grpcweb::args::Args;
 use crate::grpcweb::call::GrpcWebCall;
+use crate::grpcweb::grpc_header::*;
 
 pub mod grpcweb;
 pub mod metadata;
@@ -38,25 +40,11 @@ async fn forward(req: Request<Incoming>) -> Result<Response<GrpcWebCall<Full<Byt
 
     //[END] switch endpoint
 
-    //[START] Convert to new request
-    let res_body = res_body.collect().await?;
-    let mut req = Request::from_parts(
-        parts,
-        GrpcWebCall::client_request(Full::<Bytes>::new(res_body.to_bytes())),
-    );
-
-    req.headers_mut().insert(
-        hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/grpc"),
-    );
-
-    req.headers_mut().remove(hyper::header::CONTENT_LENGTH);
-
-    req.headers_mut()
-        .insert(hyper::header::HOST, authority.as_str().parse()?);
-    //[END]Convert to new request
-
-    let authority = authority.to_string();
+    // let authority = req
+    //     .uri()
+    //     .authority()
+    //     .ok_or("Request URI has no authority")?
+    //     .to_string();
 
     let stream = TcpStream::connect(authority).await?;
     let io = TokioIo::new(stream);
