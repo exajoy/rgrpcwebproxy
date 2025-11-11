@@ -1,0 +1,5 @@
+# [profile.default]
+# retries = 2
+#
+# [profile.default.run]
+# override-fail-fast = true

@@ -1,3 +1,30 @@
+// Initially I want to use GrpcWebCall
+// to parse trailers from response body
+// of htt2
+// However, hyper already parse the trailers
+// and I could not receive the frame of the
+// trailers in poll_frame function
+// I could get trailers using
+// ```
+// while let Some(frame) = body.frame().await {
+//     let frame = frame?;
+//
+//     // ✅ Use helper methods instead of pattern matching
+//     if let Some(data) = frame.data_ref() {
+//         println!("Data: {:?}", data);
+//     }
+//     if let Some(trailers) = frame.trailers_ref() {
+//         println!("Trailers:");
+//         for (k, v) in trailers.iter() {
+//             println!("  {}: {:?}", k, v);
+//         }
+//     }
+// }
+// ```
+//
+// The other benefit of using GrpcWebCall here
+// is to correct headers from grpc-web to grpc
+// and vice versa
 #![allow(dead_code)]
 
 use std::fmt;
@@ -7,6 +34,7 @@ use std::task::{Context, Poll, ready};
 use crate::status::Status;
 use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures_core::Stream;
 use http::{HeaderMap, HeaderName, HeaderValue, header};
 use http_body::{Frame, SizeHint};
 use hyper::body::Body;
@@ -214,7 +242,13 @@ where
                 .project()
                 .inner
                 .poll_frame(cx)
-                .map_ok(|f| f.map_data(|mut d| d.copy_to_bytes(d.remaining())))
+                .map_ok(|f| {
+                    f.map_data(|mut d| {
+                        let next = d.copy_to_bytes(d.remaining());
+                        print_bytes_as_hex(&next);
+                        next
+                    })
+                })
                 .map_err(internal_error),
         }
     }
@@ -253,6 +287,17 @@ where
     }
 }
 
+pub fn print_bytes_as_hex(bytes: &Bytes) {
+    // let hex_string: String = bytes.iter().map(|b| format!("{:02x} ", b)).collect();
+    // println!("{}", hex_string);
+    let output = bytes
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    println!("{}", output);
+}
 impl<B> Body for GrpcWebCall<B>
 where
     B: Body,
@@ -265,6 +310,17 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // self.project()
+        //     .inner
+        //     .poll_frame(cx)
+        //     .map_ok(|f| {
+        //         f.map_data(|mut d| {
+        //             let next = d.copy_to_bytes(d.remaining());
+        //             print_bytes_as_hex(&next);
+        //             next
+        //         })
+        //     })
+        //     .map_err(internal_error)
         if self.client && self.direction == Direction::Decode {
             let mut me = self.as_mut();
 
@@ -345,6 +401,17 @@ where
     }
 }
 
+impl<B> Stream for GrpcWebCall<B>
+where
+    B: Body,
+    B::Error: fmt::Display,
+{
+    type Item = Result<Frame<Bytes>, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll_frame(cx)
+    }
+}
 impl Encoding {
     pub(crate) fn from_content_type(headers: &HeaderMap) -> Encoding {
         Self::from_header(headers.get(header::CONTENT_TYPE))
