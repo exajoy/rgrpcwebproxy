@@ -54,33 +54,33 @@ jobs:
         run: |
           choco install zip
           cd target/${{ matrix.x86_64-target }}/release
-          zip grex-${{ steps.get_version.outputs.version }}-${{ matrix.x86_64-target }}.zip grex.exe
+          zip rgrpcproxyweb-${{ steps.get_version.outputs.version }}-${{ matrix.x86_64-target }}.zip rgrpcproxyweb.exe
           cd ../../..
 
       - name: Create aarch64 zip file on Windows
         if: ${{ matrix.os == 'windows-latest' }}
         run: |
           cd target/${{ matrix.aarch64-target }}/release
-          zip grex-${{ steps.get_version.outputs.version }}-${{ matrix.aarch64-target }}.zip grex.exe
+          zip rgrpcproxyweb-${{ steps.get_version.outputs.version }}-${{ matrix.aarch64-target }}.zip rgrpcproxyweb.exe
           cd ../../..
 
       - name: Create x86_64 tar.gz file on Linux and macOS
         if: ${{ matrix.os != 'windows-latest' }}
         run: |
-          chmod +x target/${{ matrix.x86_64-target }}/release/grex
-          tar -zcf target/${{ matrix.x86_64-target }}/release/grex-${{ steps.get_version.outputs.version }}-${{ matrix.x86_64-target }}.tar.gz -C target/${{ matrix.x86_64-target }}/release grex
+          chmod +x target/${{ matrix.x86_64-target }}/release/rgrpcproxyweb
+          tar -zcf target/${{ matrix.x86_64-target }}/release/rgrpcproxyweb-${{ steps.get_version.outputs.version }}-${{ matrix.x86_64-target }}.tar.gz -C target/${{ matrix.x86_64-target }}/release rgrpcproxyweb
 
       - name: Create aarch64 tar.gz file on Linux and macOS
         if: ${{ matrix.os != 'windows-latest' }}
         run: |
-          chmod +x target/${{ matrix.aarch64-target }}/release/grex
-          tar -zcf target/${{ matrix.aarch64-target }}/release/grex-${{ steps.get_version.outputs.version }}-${{ matrix.aarch64-target }}.tar.gz -C target/${{ matrix.aarch64-target }}/release grex
+          chmod +x target/${{ matrix.aarch64-target }}/release/rgrpcproxyweb
+          tar -zcf target/${{ matrix.aarch64-target }}/release/rgrpcproxyweb-${{ steps.get_version.outputs.version }}-${{ matrix.aarch64-target }}.tar.gz -C target/${{ matrix.aarch64-target }}/release rgrpcproxyweb
 
       - name: Upload release and assets to GitHub
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref }}
-          release_name: grex ${{ steps.get_version.outputs.version-without-v }}
+          release_name: rgrpcproxyweb ${{ steps.get_version.outputs.version-without-v }}
           file_glob: true
-          file: target/*/release/grex-${{ steps.get_version.outputs.version }}-*.{zip,tar.gz}
+          file: target/*/release/rgrpcproxyweb-${{ steps.get_version.outputs.version }}-*.{zip,tar.gz}
