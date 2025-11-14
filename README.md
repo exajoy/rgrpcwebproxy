@@ -72,6 +72,7 @@ cargo build --release
 - [ ] Health check support
 - [ ] CORS support
 - [ ] TLS support
+- [ ] FFI to use in other languages
 
 ## Contribution
 
