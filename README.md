@@ -6,20 +6,26 @@ In the world of package transmission, gRPC-Web and gRPC are becoming increasingl
 However, the current solutions of converting gRPRC-Web to gRPC, such as Envoy,
 are often too large and complex for lightweight applications.
 
-Griffin is a lightweight proxy built on top of hyper.rs to handle gRPC-web, translating gRPC-web requests to standard gRPC requests.
-Griffin's binary is only 2.5MB, 100 times smaller than Envoy's binary (250MB+).
+Griffin is a lightweight proxy built on top of hyper.rs that translate gRPC-web to standard gRPC requests.
+Griffin's binary is only 2.5MB, **100x smaller** than Envoy's binary (250MB+) and **30x smaller**
+than grpcwebproxy 15.3MB) **without garbage collection**.
+
+## Features
+
+Griffin supports both gRPC-web and gRPC traffics at the same time:
+
+- Interoeprability between grpc-web clients and grpc servers
 
 ```
 grpc-web client <--> griffin (grpc-web to grpc proxy) <--> grpc server
 ```
 
+- Minimal gRPC reverse proxy
+
 ```
 grpc client <--> griffin <--> grpc server
 ```
 
-## Features
-
-- Interoeprability between grpc-web clients and grpc servers
 - Support 2 types of grpc-web requests (unary and server streaming)
 - Support 4 types standard grpc requests (unary request, server streaming, client streaming, bidi streaming)
 
