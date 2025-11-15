@@ -1,22 +1,15 @@
-use async_stream::try_stream;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use futures_core::Stream;
-use http::StatusCode;
-use http::{HeaderMap, HeaderValue, Request, Response, Uri, header::CONTENT_TYPE, uri::Authority};
-use http_body::{Body, Frame};
-use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::{body::Incoming, client::conn::http2};
+use http::{Request, Response, Uri, header::CONTENT_TYPE, uri::Authority};
+use http_body::Frame;
+use http_body_util::StreamBody;
+use hyper::client::conn::http2;
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
-use prometheus::{
-    CounterVec, Encoder, HistogramVec, TextEncoder, register_counter_vec, register_histogram_vec,
-};
 use scopeguard::defer;
-use std::convert::Infallible;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -24,16 +17,16 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tower::BoxError;
 
+use crate::core::grpc_kind::GrpcKind;
+use crate::telemetry::metrics::Metrics;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub mod grpcweb;
-pub mod metadata;
-pub mod status;
-pub mod util;
-
-type DynStream = Pin<Box<dyn Stream<Item = Result<Frame<Bytes>, hyper::Error>> + Send>>;
-type StreamResponse = Response<StreamBody<DynStream>>;
+pub mod command;
+pub mod core;
+pub mod telemetry;
+pub mod trailers;
 
 pub async fn forward<B>(
     req: Request<B>,
@@ -44,7 +37,6 @@ pub async fn forward<B>(
     BoxError,
 >
 where
-    // B: Body + Send + 'static,
     B: hyper::body::Body<Data = Bytes> + Send + 'static + Unpin,
     B::Error: Into<BoxError>,
 {
@@ -55,6 +47,7 @@ where
         .insert(hyper::header::HOST, authority.as_str().parse()?);
 
     let path = parts.uri.path().to_string();
+
     // Early exit for /metrics
     if path == "/metrics" {
         return Ok(metrics.render());
@@ -75,9 +68,6 @@ where
 
     parts.uri = url.parse::<Uri>()?;
 
-    // println!("Forward URL: {}", parts.uri);
-    // println!("Authority: {}", authority);
-
     //[END] switch endpoint
 
     let stream = TcpStream::connect(authority.to_string()).await?;
@@ -95,146 +85,16 @@ where
             println!("Connection failed: {:?}", err);
         }
     });
-
-    if let Some(value) = parts.headers.get(CONTENT_TYPE)
-        && value == "application/grpc"
-    {
-        return return_grpc(sender, parts, req_body).await;
-    }
-    return_grpc_web(sender, parts, req_body).await
-}
-
-async fn return_grpc_web<B>(
-    mut sender: http2::SendRequest<B>,
-    parts: http::request::Parts,
-    req_body: B,
-) -> Result<StreamResponse, BoxError>
-where
-    B: hyper::body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<BoxError>,
-{
-    //[START] Convert to new request
-    let mut req = Request::from_parts(parts, req_body);
-
-    req.headers_mut().insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/grpc"),
-    );
-
-    req.headers_mut().remove(hyper::header::CONTENT_LENGTH);
-
-    //[END]Convert to new request
-
-    let fut = sender.send_request(req);
-    let res = fut.await.map_err(Into::<BoxError>::into).map(|res| {
-        let (parts, body) = res.into_parts();
-        Response::from_parts(parts, body)
-    })?;
-
-    // Read body data
-    let (parts, mut body) = res.into_parts();
-
-    let forward_stream = try_stream! {
-        while let Some(frame) = body.frame().await {
-            let frame = frame?;
-            // if there is a trailer, convert it into data frame and send
-            if let Some(trailers) = frame.trailers_ref() {
-                let trailers = Trailers::new(trailers.clone());
-                yield Frame::data(trailers.into_to_frame());
-            } else {
-                if let Some(_data) = frame.data_ref() {
-                    // println!("Data: {:?}", data);
-                }
-                yield frame;
-            }
-        }
-    };
-    let boxed_stream: DynStream = Box::pin(forward_stream);
-    let body = StreamBody::new(boxed_stream);
-
-    // trailers is splitted from body
-    let mut res = Response::from_parts(parts, body);
-    res.headers_mut().insert(
-        "content-type",
-        "application/grpc-web+proto".parse().unwrap(),
-    );
-    Ok(res)
-}
-
-async fn return_grpc<B>(
-    mut sender: http2::SendRequest<B>,
-    parts: http::request::Parts,
-    req_body: B,
-) -> Result<StreamResponse, BoxError>
-where
-    // B: Body,
-    // B: Body + Send + 'static,
-    B: hyper::body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<BoxError>,
-{
+    let content_type = parts
+        .headers
+        .get(CONTENT_TYPE)
+        .ok_or("Missing Content-Type header")?
+        .clone();
     let req = Request::from_parts(parts, req_body);
-    let res = sender.send_request(req).await?;
-
-    //1.convert type Incoming to StreamBody<DynStream>
-    // this does not affect the logic
-    //2.no need to process trailer
-    let res = res.map(incoming_to_stream_body);
-    Ok(res)
-}
-
-pub fn incoming_to_stream_body(mut body: Incoming) -> StreamBody<DynStream> {
-    let forward_stream = try_stream! {
-        while let Some(frame) = body.frame().await {
-            let frame = frame?;
-            yield frame;
-        }
-    };
-    StreamBody::new(Box::pin(forward_stream))
-}
-
-pub fn full_to_stream_body(mut body: Full<Bytes>) -> StreamBody<DynStream> {
-    let forward_stream = try_stream! {
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|e: Infallible| -> hyper::Error { match e {} })?;
-            yield frame;
-        }
-    };
-    StreamBody::new(Box::pin(forward_stream))
-}
-
-fn encode_trailers(trailers: &HeaderMap) -> Vec<u8> {
-    trailers.iter().fold(Vec::new(), |mut acc, (key, value)| {
-        acc.put_slice(key.as_ref());
-        acc.push(b':');
-        acc.put_slice(value.as_bytes());
-        acc.put_slice(b"\r\n");
-        acc
-    })
-}
-
-const FRAME_HEADER_SIZE: usize = 5;
-const GRPC_WEB_TRAILERS_BIT: u8 = 0b10000000;
-
-struct Trailers {
-    inner: HeaderMap,
-}
-impl Trailers {
-    fn new(inner: HeaderMap) -> Self {
-        Self { inner }
-    }
-
-    fn into_to_frame(self) -> Bytes {
-        let trailers = encode_trailers(&self.inner);
-        let len = trailers.len();
-        assert!(len <= u32::MAX as usize);
-
-        let mut frame = BytesMut::with_capacity(len + FRAME_HEADER_SIZE);
-        frame.put_u8(GRPC_WEB_TRAILERS_BIT);
-        frame.put_u32(len as u32);
-        frame.put_slice(&trailers);
-
-        frame.freeze()
-    }
+    GrpcKind::from_content_type(&content_type)
+        .ok_or("Unsupported Content-Type header")?
+        .forward(sender, req)
+        .await
 }
 
 pub async fn start_proxy(
@@ -284,45 +144,5 @@ pub async fn start_proxy(
             }
         }
     }
-    drop(listener);
     Ok(())
-}
-
-#[derive(Clone)]
-pub struct Metrics {
-    requests_total: CounterVec,
-    request_duration: HistogramVec,
-}
-
-impl Metrics {
-    fn new() -> Self {
-        Self {
-            requests_total: register_counter_vec!(
-                "http_requests_total",
-                "Total number of HTTP requests handled",
-                &["method", "path"]
-            )
-            .unwrap(),
-            request_duration: register_histogram_vec!(
-                "http_request_duration_seconds",
-                "Request duration in seconds",
-                &["method", "path"]
-            )
-            .unwrap(),
-        }
-    }
-
-    fn render(&self) -> StreamResponse {
-        let encoder = TextEncoder::new();
-        let metric_families = prometheus::gather();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-
-        let res = Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", encoder.format_type())
-            .body(Full::<Bytes>::from(Bytes::from(buffer)))
-            .unwrap();
-        res.map(full_to_stream_body)
-    }
 }

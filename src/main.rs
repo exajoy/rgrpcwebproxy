@@ -1,5 +1,5 @@
 use clap::Parser;
-use griffin::{grpcweb::args::Args, start_proxy};
+use griffin::{command::args::Args, start_proxy};
 use tokio::net::TcpListener;
 use tower::BoxError;
 
